@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a compact stationary-spoke dataset for PySR in Colab."""
+"""Prepare a direct x, y, t -> rho_i dataset for PySR in Colab."""
 
 from __future__ import annotations
 
@@ -9,10 +9,7 @@ import math
 import re
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.ndimage import gaussian_filter
-from sklearn.model_selection import train_test_split
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,12 +25,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steady-fraction", type=float, default=0.55, help="Use frames after this fraction of the sequence.")
     parser.add_argument("--t-start", type=float, default=None, help="Optional physical start time for stationary interval.")
     parser.add_argument("--t-end", type=float, default=None, help="Optional physical end time for stationary interval.")
-    parser.add_argument("--r-min-frac", type=float, default=0.08, help="Ignore central disk below this fraction of max radius.")
-    parser.add_argument("--r-max-frac", type=float, default=0.96, help="Ignore outer cells above this fraction of max radius.")
-    parser.add_argument("--samples-per-frame", type=int, default=1200, help="Training samples drawn per stationary frame.")
+    parser.add_argument("--domain-eps", type=float, default=0.0, help="Cells with abs(rho_i) <= this are excluded.")
+    parser.add_argument("--domain-min-occupancy", type=float, default=0.10, help="Fraction of stationary frames where a cell must be nonzero to enter the domain.")
+    parser.add_argument("--samples-per-frame", type=int, default=300, help="Random samples drawn per stationary frame.")
     parser.add_argument("--validation-size", type=float, default=0.2, help="Validation fraction.")
-    parser.add_argument("--smooth-sigma", type=float, default=0.8, help="Gaussian smoothing in cells before fitting.")
-    parser.add_argument("--high-density-fraction", type=float, default=0.55, help="Fraction of samples biased toward high density.")
     parser.add_argument("--signed-target", action="store_true", help="Fit signed rho_i instead of abs(rho_i).")
     parser.add_argument("--random-state", type=int, default=7, help="Random seed.")
     return parser.parse_args()
@@ -62,9 +57,7 @@ def make_grid(shape: tuple[int, int], dx: float, dy: float, cx: float | None, cy
     j, i = np.meshgrid(np.arange(nx), np.arange(ny))
     x = (j - cx) * dx
     y = (i - cy) * dy
-    r = np.hypot(x, y)
-    theta = np.arctan2(y, x)
-    return x, y, r, theta, float(cx), float(cy)
+    return x, y, float(cx), float(cy)
 
 
 def stationary_indices(times: np.ndarray, steady_fraction: float, t_start: float | None, t_end: float | None) -> np.ndarray:
@@ -77,53 +70,68 @@ def stationary_indices(times: np.ndarray, steady_fraction: float, t_start: float
         first = int(math.floor(len(times) * steady_fraction))
         mask[:first] = False
     idx = np.flatnonzero(mask)
-    if idx.size < 5:
-        raise ValueError("Stationary interval has fewer than 5 frames. Relax --steady-fraction/--t-start/--t-end.")
+    if idx.size < 2:
+        raise ValueError("Stationary interval has fewer than 2 frames. Relax --steady-fraction/--t-start/--t-end.")
     return idx
 
 
-def estimate_phase(frame: np.ndarray, theta: np.ndarray, mask: np.ndarray) -> float:
-    values = frame[mask]
-    baseline = np.quantile(values, 0.55)
-    weights = np.clip(values - baseline, 0.0, None)
-    if not np.any(weights > 0):
-        weights = np.clip(values, 0.0, None)
-    moment = np.sum(weights * np.exp(1j * theta[mask]))
-    return float(np.angle(moment))
+def load_target(path: Path, signed_target: bool) -> np.ndarray:
+    frame = np.loadtxt(path)
+    if frame.ndim != 2:
+        raise ValueError(f"{path} is not a 2D matrix.")
+    return frame if signed_target else np.abs(frame)
 
 
-def fit_rotation(times: np.ndarray, phases: np.ndarray) -> tuple[float, float, np.ndarray]:
-    unwrapped = np.unwrap(phases)
-    omega, phase0 = np.polyfit(times, unwrapped, deg=1)
-    fitted = omega * times + phase0
-    return float(omega), float(phase0), fitted
-
-
-def wrap_angle(a: np.ndarray) -> np.ndarray:
-    return np.arctan2(np.sin(a), np.cos(a))
-
-
-def sample_frame(
-    rng: np.random.Generator,
-    frame: np.ndarray,
-    base_mask: np.ndarray,
-    n_samples: int,
-    high_density_fraction: float,
+def estimate_domain_mask(
+    paths: list[Path],
+    frame_indices: np.ndarray,
+    signed_target: bool,
+    domain_eps: float,
+    min_occupancy: float,
 ) -> np.ndarray:
-    flat_mask = np.flatnonzero(base_mask.ravel())
-    if flat_mask.size == 0:
-        raise ValueError("Sampling mask is empty.")
+    occupancy = None
+    for idx in frame_indices:
+        frame = load_target(paths[idx], signed_target)
+        nonzero = np.abs(frame) > domain_eps
+        if occupancy is None:
+            occupancy = np.zeros(nonzero.shape, dtype=float)
+        elif occupancy.shape != nonzero.shape:
+            raise ValueError(f"Inconsistent frame shape in {paths[idx]}.")
+        occupancy += nonzero
+    if occupancy is None:
+        raise ValueError("Cannot estimate domain mask without frames.")
+    mask = occupancy / len(frame_indices) >= min_occupancy
+    if not np.any(mask):
+        raise ValueError("Estimated plasma-domain mask is empty. Lower --domain-eps or --domain-min-occupancy.")
+    return mask
 
-    n_high = int(round(n_samples * high_density_fraction))
-    n_random = n_samples - n_high
-    values = frame.ravel()[flat_mask]
-    scores = np.clip(values - np.quantile(values, 0.60), 0.0, None)
-    if np.sum(scores) <= 0:
-        scores = np.ones_like(scores)
-    probs = scores / np.sum(scores)
-    high = rng.choice(flat_mask, size=n_high, replace=True, p=probs)
-    random = rng.choice(flat_mask, size=n_random, replace=True)
-    return np.concatenate([high, random])
+
+def sample_frame(rng: np.random.Generator, frame: np.ndarray, domain_mask: np.ndarray, n_samples: int) -> np.ndarray:
+    candidates = np.flatnonzero((domain_mask & (np.abs(frame) > 0.0)).ravel())
+    if candidates.size == 0:
+        candidates = np.flatnonzero(domain_mask.ravel())
+    if candidates.size == 0:
+        raise ValueError("Sampling mask is empty.")
+    replace = n_samples > candidates.size
+    return rng.choice(candidates, size=n_samples, replace=replace)
+
+
+def train_validation_split(
+    rng: np.random.Generator,
+    X: np.ndarray,
+    y: np.ndarray,
+    meta: np.ndarray,
+    validation_size: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if not 0.0 < validation_size < 1.0:
+        raise ValueError("--validation-size must be between 0 and 1.")
+    indices = rng.permutation(len(y))
+    n_val = max(1, int(round(len(y) * validation_size)))
+    val_idx = indices[:n_val]
+    train_idx = indices[n_val:]
+    if train_idx.size == 0:
+        raise ValueError("Training split is empty. Lower --validation-size or increase samples.")
+    return X[train_idx], X[val_idx], y[train_idx], y[val_idx], meta[train_idx], meta[val_idx]
 
 
 def main() -> None:
@@ -135,46 +143,36 @@ def main() -> None:
     paths = load_paths(Path(args.data_dir), args.pattern)
     steps = np.array([extract_step(path) for path in paths], dtype=float)
     times = steps * args.dt
-
-    first = np.loadtxt(paths[0])
-    x, y, r, theta, center_x, center_y = make_grid(first.shape, args.dx, args.dy, args.center_x, args.center_y)
-    r_max = float(np.max(r))
-    annulus = (r >= args.r_min_frac * r_max) & (r <= args.r_max_frac * r_max)
     steady_idx = stationary_indices(times, args.steady_fraction, args.t_start, args.t_end)
 
-    phase_frames = []
-    phases = []
-    for idx in steady_idx:
-        raw = np.loadtxt(paths[idx])
-        frame = raw if args.signed_target else np.abs(raw)
-        if args.smooth_sigma > 0:
-            frame = gaussian_filter(frame, sigma=args.smooth_sigma)
-        phases.append(estimate_phase(frame, theta, annulus))
-        phase_frames.append(idx)
+    first = load_target(paths[0], args.signed_target)
+    x, y, center_x, center_y = make_grid(first.shape, args.dx, args.dy, args.center_x, args.center_y)
+    domain_mask = estimate_domain_mask(paths, steady_idx, args.signed_target, args.domain_eps, args.domain_min_occupancy)
+    if domain_mask.shape != first.shape:
+        raise ValueError(f"Domain mask has shape {domain_mask.shape}, expected {first.shape}.")
 
-    phase_times = times[np.array(phase_frames)]
-    omega, phase0, fitted_phase = fit_rotation(phase_times, np.array(phases))
+    x_scale = float(np.max(np.abs(x[domain_mask])))
+    y_scale = float(np.max(np.abs(y[domain_mask])))
+    t0 = float(times[steady_idx[0]])
+    t_scale = float(max(times[steady_idx[-1]] - t0, 1.0))
+    coordinate_scale = float(max(x_scale, y_scale, 1.0))
 
     feature_rows = []
     target_rows = []
     meta_rows = []
     for idx in steady_idx:
-        raw = np.loadtxt(paths[idx])
-        frame = raw if args.signed_target else np.abs(raw)
-        if args.smooth_sigma > 0:
-            frame = gaussian_filter(frame, sigma=args.smooth_sigma)
-        picked = sample_frame(rng, frame, annulus, args.samples_per_frame, args.high_density_fraction)
+        frame = load_target(paths[idx], args.signed_target)
+        if frame.shape != first.shape:
+            raise ValueError(f"Inconsistent frame shape: {paths[idx]} has {frame.shape}, expected {first.shape}.")
+        picked = sample_frame(rng, frame, domain_mask, args.samples_per_frame)
         iy, ix = np.unravel_index(picked, frame.shape)
-        psi = wrap_angle(theta[iy, ix] - omega * times[idx] - phase0)
-        r_n = r[iy, ix] / r_max
-        cpsi = np.cos(psi)
-        spsi = np.sin(psi)
-        xrot_n = r_n * cpsi
-        yrot_n = r_n * spsi
-        features = np.column_stack([r_n, cpsi, spsi, xrot_n, yrot_n])
-        feature_rows.append(features)
+        x_n = x[iy, ix] / coordinate_scale
+        y_n = y[iy, ix] / coordinate_scale
+        t_phys = np.full_like(x_n, times[idx], dtype=float)
+        t_n = (t_phys - t0) / t_scale
+        feature_rows.append(np.column_stack([x_n, y_n, t_n]))
         target_rows.append(frame[iy, ix])
-        meta_rows.append(np.column_stack([np.full_like(r_n, steps[idx]), np.full_like(r_n, times[idx]), x[iy, ix], y[iy, ix]]))
+        meta_rows.append(np.column_stack([np.full_like(x_n, steps[idx]), t_phys, x[iy, ix], y[iy, ix]]))
 
     X = np.vstack(feature_rows)
     y_target = np.concatenate(target_rows)
@@ -184,17 +182,13 @@ def main() -> None:
         target_scale = 1.0
     y_scaled = y_target / target_scale
 
-    X_train, X_val, y_train, y_val, meta_train, meta_val = train_test_split(
-        X,
-        y_scaled,
-        sample_meta,
-        test_size=args.validation_size,
-        random_state=args.random_state,
+    X_train, X_val, y_train, y_val, meta_train, meta_val = train_validation_split(
+        rng, X, y_scaled, sample_meta, args.validation_size
     )
 
-    feature_names = np.array(["r_n", "cpsi", "spsi", "xrot_n", "yrot_n"])
+    feature_names = np.array(["x_n", "y_n", "t_n"])
     np.savez_compressed(
-        out_dir / "spoke_dataset.npz",
+        out_dir / "dataset.npz",
         X_train=X_train,
         y_train=y_train,
         X_val=X_val,
@@ -217,45 +211,25 @@ def main() -> None:
         "dt": args.dt,
         "center_x_cell": center_x,
         "center_y_cell": center_y,
-        "r_scale": r_max,
-        "omega": omega,
-        "phase0": phase0,
+        "coordinate_scale": coordinate_scale,
+        "x_scale": x_scale,
+        "y_scale": y_scale,
+        "t0": t0,
+        "t_scale": t_scale,
+        "domain_eps": args.domain_eps,
+        "domain_min_occupancy": args.domain_min_occupancy,
+        "domain_cell_count": int(np.count_nonzero(domain_mask)),
         "target_scale": target_scale,
         "target_kind": "signed_rho_i" if args.signed_target else "abs_rho_i",
         "feature_names": feature_names.tolist(),
-        "formula_mapping": "rho_i ~= target_scale * F(r/r_scale, cos(theta - omega*t - phase0), sin(theta - omega*t - phase0), (r/r_scale)*cos(...), (r/r_scale)*sin(...))",
     }
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    residual = wrap_angle(np.array(phases) - fitted_phase)
-    fig, ax = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
-    ax[0].plot(phase_times, np.unwrap(phases), "o", ms=3, label="tracked phase")
-    ax[0].plot(phase_times, fitted_phase, "-", label=f"fit: omega={omega:.6g}")
-    ax[0].set_ylabel("unwrapped phase")
-    ax[0].legend()
-    ax[1].plot(phase_times, residual, "o", ms=3)
-    ax[1].set_xlabel("time")
-    ax[1].set_ylabel("wrapped residual")
-    fig.tight_layout()
-    fig.savefig(out_dir / "angle_fit.png", dpi=180)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    shown = min(6000, meta_train.shape[0])
-    ax.scatter(meta_train[:shown, 2], meta_train[:shown, 3], c=y_train[:shown], s=2, cmap="magma")
-    ax.set_aspect("equal")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_title("Sampled training points")
-    fig.tight_layout()
-    fig.savefig(out_dir / "sampled_points.png", dpi=180)
-    plt.close(fig)
-
-    print(f"Saved dataset to {out_dir / 'spoke_dataset.npz'}")
+    print(f"Saved dataset to {out_dir / 'dataset.npz'}")
     print(f"Saved metadata to {out_dir / 'metadata.json'}")
     print(f"Stationary frames: {steady_idx.size} / {len(paths)}")
-    print(f"Estimated omega = {omega:.10g} rad per physical time unit")
-    print(f"Estimated period = {2*np.pi/abs(omega):.10g}" if omega != 0 else "Estimated period = inf")
+    print(f"Domain cells: {metadata['domain_cell_count']} / {first.size}")
+    print(f"Samples: train={len(y_train)}, validation={len(y_val)}")
 
 
 if __name__ == "__main__":

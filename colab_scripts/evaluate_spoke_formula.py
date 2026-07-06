@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a fitted PySR spoke formula on full frames."""
+"""Evaluate a fitted rotating-coordinate PySR formula on full frames."""
 
 from __future__ import annotations
 
@@ -12,19 +12,16 @@ from pathlib import Path
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.ndimage import gaussian_filter
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="colab_outputs/pysr_run/model.pkl")
-    parser.add_argument("--metadata", default="colab_outputs/prepared/metadata.json")
+    parser.add_argument("--metadata", default="colab_outputs/pysr_run/metadata.json")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--pattern", default="rho_i_*.txt")
     parser.add_argument("--out-dir", default="colab_outputs/evaluation")
     parser.add_argument("--frames", nargs="*", type=int, default=None, help="Iteration numbers to render.")
-    parser.add_argument("--smooth-sigma", type=float, default=0.8, help="Match preparation smoothing.")
     parser.add_argument("--signed-target", action="store_true", help="Evaluate signed rho_i instead of abs(rho_i).")
     return parser.parse_args()
 
@@ -36,30 +33,49 @@ def extract_step(path: Path) -> int:
     return int(match.group(1))
 
 
-def wrap_angle(a: np.ndarray) -> np.ndarray:
-    return np.arctan2(np.sin(a), np.cos(a))
-
-
-def make_features(shape: tuple[int, int], step: int, metadata: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def make_grid(shape: tuple[int, int], metadata: dict) -> tuple[np.ndarray, np.ndarray]:
     ny, nx = shape
     j, i = np.meshgrid(np.arange(nx), np.arange(ny))
     x = (j - metadata["center_x_cell"]) * metadata["dx"]
     y = (i - metadata["center_y_cell"]) * metadata["dy"]
-    r = np.hypot(x, y)
-    theta = np.arctan2(y, x)
+    return x, y
+
+
+def rotating_features(shape: tuple[int, int], step: int, metadata: dict) -> np.ndarray:
+    x, y = make_grid(shape, metadata)
+    x_n = x.ravel() / metadata["coordinate_scale"]
+    y_n = y.ravel() / metadata["coordinate_scale"]
     t = step * metadata["dt"]
-    psi = wrap_angle(theta - metadata["omega"] * t - metadata["phase0"])
-    r_n = r / metadata["r_scale"]
-    cpsi = np.cos(psi)
-    spsi = np.sin(psi)
-    X = np.column_stack([
-        r_n.ravel(),
-        cpsi.ravel(),
-        spsi.ravel(),
-        (r_n * cpsi).ravel(),
-        (r_n * spsi).ravel(),
-    ])
-    return X, x, y
+    alpha = metadata["omega"] * t
+    c = np.cos(alpha)
+    s = np.sin(alpha)
+    u_n = x_n * c + y_n * s
+    v_n = -x_n * s + y_n * c
+    return np.column_stack([u_n, v_n])
+
+
+def load_target(path: Path, signed_target: bool) -> np.ndarray:
+    frame = np.loadtxt(path)
+    if frame.ndim != 2:
+        raise ValueError(f"{path} is not a 2D matrix.")
+    return frame if signed_target else np.abs(frame)
+
+
+def evaluation_mask(frame: np.ndarray, metadata: dict) -> np.ndarray:
+    domain_eps = float(metadata.get("domain_eps", 0.0))
+    mask = np.abs(frame) > domain_eps
+    if not np.any(mask):
+        mask = np.ones(frame.shape, dtype=bool)
+    return mask
+
+
+def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
+    residual = y_pred - y_true
+    mae = float(np.mean(np.abs(residual)))
+    rmse = float(np.sqrt(np.mean(residual**2)))
+    denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    r2 = float(1.0 - np.sum(residual**2) / denom) if denom > 0.0 else float("nan")
+    return mae, rmse, r2
 
 
 def main() -> None:
@@ -85,14 +101,11 @@ def main() -> None:
         str(model.get_best()["equation"]),
         "",
         "Physical mapping:",
-        f"rho_i ~= {metadata['target_scale']:.12g} * F(r_n, cpsi, spsi, xrot_n, yrot_n)",
-        f"r_n = sqrt(x^2 + y^2) / {metadata['r_scale']:.12g}",
-        f"theta = atan2(y, x)",
-        f"psi = theta - ({metadata['omega']:.12g})*t - ({metadata['phase0']:.12g})",
-        "cpsi = cos(psi)",
-        "spsi = sin(psi)",
-        "xrot_n = r_n*cpsi",
-        "yrot_n = r_n*spsi",
+        f"rho(x,y,t) ~= {metadata['target_scale']:.12g} * F(u_n, v_n)",
+        f"u_n = x_n*cos(({metadata['omega']:.12g})*t) + y_n*sin(({metadata['omega']:.12g})*t)",
+        f"v_n = -x_n*sin(({metadata['omega']:.12g})*t) + y_n*cos(({metadata['omega']:.12g})*t)",
+        f"x_n = x / {metadata['coordinate_scale']:.12g}",
+        f"y_n = y / {metadata['coordinate_scale']:.12g}",
     ]
     (out_dir / "formula.txt").write_text("\n".join(formula_lines), encoding="utf-8")
 
@@ -101,28 +114,28 @@ def main() -> None:
         if step not in by_step:
             print(f"Skipping missing frame {step}")
             continue
-        raw = np.loadtxt(by_step[step])
-        target = raw if args.signed_target else np.abs(raw)
-        if args.smooth_sigma > 0:
-            target = gaussian_filter(target, sigma=args.smooth_sigma)
-        X, x, y = make_features(target.shape, step, metadata)
+        target = load_target(by_step[step], args.signed_target)
+        mask = evaluation_mask(target, metadata)
+        X = rotating_features(target.shape, step, metadata)
         pred = model.predict(X).reshape(target.shape) * metadata["target_scale"]
         residual = pred - target
-        flat_target = target.ravel()
-        flat_pred = pred.ravel()
+
+        flat_target = target[mask]
+        flat_pred = pred[mask]
+        mae, rmse, r2 = regression_metrics(flat_target, flat_pred)
         metric_rows.append(
             {
                 "step": step,
-                "mae": mean_absolute_error(flat_target, flat_pred),
-                "rmse": float(np.sqrt(mean_squared_error(flat_target, flat_pred))),
-                "r2": r2_score(flat_target, flat_pred),
-                "target_max": float(np.max(target)),
-                "pred_max": float(np.max(pred)),
+                "mae": mae,
+                "rmse": rmse,
+                "r2": r2,
+                "target_max": float(np.max(target[mask])),
+                "pred_max": float(np.max(pred[mask])),
             }
         )
 
-        vmax = np.percentile(target[target > 0], 99.5) if np.any(target > 0) else np.max(target)
-        lim = max(np.percentile(np.abs(residual), 99.0), 1e-12)
+        vmax = np.percentile(target[mask], 99.5) if np.any(mask) else np.max(target)
+        lim = max(np.percentile(np.abs(residual[mask]), 99.0), 1e-12)
         fig, ax = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
         im0 = ax[0].imshow(target, origin="lower", cmap="magma", vmax=vmax)
         ax[0].set_title(f"data step={step}")

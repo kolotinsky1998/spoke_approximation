@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit an explicit stationary-spoke formula with PySR."""
+"""Fit rho_i(x, y, t) as F(rotating coordinates) with PySR."""
 
 from __future__ import annotations
 
@@ -9,29 +9,52 @@ from pathlib import Path
 
 import joblib
 import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="colab_outputs/prepared/spoke_dataset.npz")
+    parser.add_argument("--dataset", default="colab_outputs/prepared/dataset.npz")
     parser.add_argument("--metadata", default="colab_outputs/prepared/metadata.json")
     parser.add_argument("--out-dir", default="colab_outputs/pysr_run")
-    parser.add_argument("--niterations", type=int, default=800)
-    parser.add_argument("--populations", type=int, default=24)
-    parser.add_argument("--maxsize", type=int, default=45)
-    parser.add_argument("--parsimony", type=float, default=0.002)
-    parser.add_argument("--timeout-minutes", type=float, default=None, help="Stop PySR after this many minutes.")
-    parser.add_argument(
-        "--operator-set",
-        choices=["fast", "balanced", "full"],
-        default="balanced",
-        help="Operator set for PySR. 'fast' is best for first Colab checks.",
-    )
+    parser.add_argument("--omega-min", type=float, required=True, help="Minimum omega in rad per physical time unit.")
+    parser.add_argument("--omega-max", type=float, required=True, help="Maximum omega in rad per physical time unit.")
+    parser.add_argument("--omega-count", type=int, default=17, help="Number of omega values in the grid search.")
+    parser.add_argument("--niterations", type=int, default=80)
+    parser.add_argument("--populations", type=int, default=8)
+    parser.add_argument("--maxsize", type=int, default=30)
+    parser.add_argument("--parsimony", type=float, default=0.003)
     parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
+    parser.add_argument("--timeout-minutes", type=float, default=None, help="Approximate total PySR time budget across the omega scan.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--procs", type=int, default=0, help="Julia worker processes. 0 lets PySR choose.")
     return parser.parse_args()
+
+
+def rotating_features(X: np.ndarray, omega: float, metadata: dict) -> np.ndarray:
+    x_n = X[:, 0]
+    y_n = X[:, 1]
+    t = X[:, 2] * metadata["t_scale"] + metadata["t0"]
+    alpha = omega * t
+    c = np.cos(alpha)
+    s = np.sin(alpha)
+    u_n = x_n * c + y_n * s
+    v_n = -x_n * s + y_n * c
+    return np.column_stack([u_n, v_n])
+
+
+def metrics_dict(y_true: np.ndarray, y_pred: np.ndarray, target_scale: float, prefix: str) -> dict:
+    residual = y_pred - y_true
+    rmse_scaled = float(np.sqrt(np.mean(residual**2)))
+    mae_scaled = float(np.mean(np.abs(residual)))
+    denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    r2 = float(1.0 - np.sum(residual**2) / denom) if denom > 0.0 else float("nan")
+    return {
+        f"{prefix}_mae_scaled": mae_scaled,
+        f"{prefix}_rmse_scaled": rmse_scaled,
+        f"{prefix}_r2": r2,
+        f"{prefix}_mae_physical": mae_scaled * target_scale,
+        f"{prefix}_rmse_physical": rmse_scaled * target_scale,
+    }
 
 
 def main() -> None:
@@ -44,45 +67,20 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit(
             "PySR is not installed. In Colab run:\n"
-            '  pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib'
+            '  %pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib'
         ) from exc
 
     data = np.load(args.dataset, allow_pickle=True)
-    X_train = data["X_train"]
+    X_train_raw = data["X_train"]
     y_train = data["y_train"]
-    X_val = data["X_val"]
+    X_val_raw = data["X_val"]
     y_val = data["y_val"]
-    feature_names = [str(x) for x in data["feature_names"]]
     metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
+    target_scale = float(metadata["target_scale"])
 
-    if args.operator_set == "fast":
-        binary_operators = ["+", "-", "*"]
-        unary_operators = []
-        constraints = {}
-        nested_constraints = {}
-    elif args.operator_set == "balanced":
-        binary_operators = ["+", "-", "*", "/"]
-        unary_operators = ["sqrt", "abs"]
-        constraints = {
-            "sqrt": 9,
-            "/": (-1, 9),
-        }
-        nested_constraints = {}
-    else:
-        binary_operators = ["+", "-", "*", "/"]
-        unary_operators = ["sin", "cos", "exp", "sqrt", "abs"]
-        constraints = {
-            "exp": 9,
-            "sin": 9,
-            "cos": 9,
-            "sqrt": 9,
-            "/": (-1, 9),
-        }
-        nested_constraints = {
-            "sin": {"sin": 0, "cos": 0, "exp": 0},
-            "cos": {"sin": 0, "cos": 0, "exp": 0},
-            "exp": {"exp": 0},
-        }
+    if args.omega_count < 1:
+        raise ValueError("--omega-count must be >= 1")
+    omega_values = np.linspace(args.omega_min, args.omega_max, args.omega_count)
 
     model_kwargs = dict(
         niterations=args.niterations,
@@ -90,69 +88,106 @@ def main() -> None:
         maxsize=args.maxsize,
         parsimony=args.parsimony,
         model_selection="best",
-        binary_operators=binary_operators,
-        unary_operators=unary_operators,
-        constraints=constraints,
-        nested_constraints=nested_constraints,
+        binary_operators=["+", "-", "*", "/"],
+        unary_operators=["sqrt", "abs", "exp"],
+        constraints={
+            "sqrt": 9,
+            "exp": 9,
+            "/": (-1, 9),
+        },
+        nested_constraints={
+            "exp": {"exp": 0},
+        },
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
         random_state=args.random_state,
         turbo=True,
-        output_directory=str(out_dir / "pysr_outputs"),
         verbosity=1,
     )
     if args.procs > 0:
         model_kwargs["procs"] = args.procs
     if args.timeout_minutes is not None:
-        model_kwargs["timeout_in_seconds"] = args.timeout_minutes * 60.0
+        model_kwargs["timeout_in_seconds"] = args.timeout_minutes * 60.0 / args.omega_count
     if args.batch_size is not None:
         model_kwargs["batching"] = True
         model_kwargs["batch_size"] = args.batch_size
 
-    model = PySRRegressor(**model_kwargs)
-    model.fit(X_train, y_train, variable_names=feature_names)
+    runs = []
+    best_record = None
+    for run_idx, omega in enumerate(omega_values):
+        run_dir = out_dir / "pysr_outputs" / f"omega_{run_idx:03d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        X_train = rotating_features(X_train_raw, float(omega), metadata)
+        X_val = rotating_features(X_val_raw, float(omega), metadata)
 
-    pred_train = model.predict(X_train)
-    pred_val = model.predict(X_val)
-    train_rmse_scaled = float(np.sqrt(mean_squared_error(y_train, pred_train)))
-    val_rmse_scaled = float(np.sqrt(mean_squared_error(y_val, pred_val)))
-    metrics = {
-        "train_mae_scaled": float(mean_absolute_error(y_train, pred_train)),
-        "train_rmse_scaled": train_rmse_scaled,
-        "train_r2": float(r2_score(y_train, pred_train)),
-        "val_mae_scaled": float(mean_absolute_error(y_val, pred_val)),
-        "val_rmse_scaled": val_rmse_scaled,
-        "val_r2": float(r2_score(y_val, pred_val)),
-        "target_scale": metadata["target_scale"],
-        "val_mae_physical": float(mean_absolute_error(y_val, pred_val) * metadata["target_scale"]),
-        "val_rmse_physical": float(val_rmse_scaled * metadata["target_scale"]),
+        model = PySRRegressor(output_directory=str(run_dir), **model_kwargs)
+        model.fit(X_train, y_train, variable_names=["u_n", "v_n"])
+        pred_train = model.predict(X_train)
+        pred_val = model.predict(X_val)
+
+        train_metrics = metrics_dict(y_train, pred_train, target_scale, "train")
+        val_metrics = metrics_dict(y_val, pred_val, target_scale, "val")
+        record = {
+            "omega": float(omega),
+            "equation": str(model.get_best()["equation"]),
+            **train_metrics,
+            **val_metrics,
+        }
+        runs.append(record)
+        if best_record is None or record["val_rmse_scaled"] < best_record["metrics"]["val_rmse_scaled"]:
+            best_record = {"omega": float(omega), "model": model, "metrics": record}
+
+        print(
+            f"omega={omega:.12g} "
+            f"val_rmse={record['val_rmse_physical']:.6g} "
+            f"val_r2={record['val_r2']:.4f}"
+        )
+
+    if best_record is None:
+        raise RuntimeError("No PySR runs completed.")
+
+    best_model = best_record["model"]
+    best_omega = best_record["omega"]
+    best_metrics = best_record["metrics"]
+    joblib.dump(best_model, out_dir / "model.pkl")
+    best_model.equations_.to_csv(out_dir / "equations.csv", index=False)
+    (out_dir / "omega_scan_metrics.json").write_text(json.dumps(runs, indent=2), encoding="utf-8")
+
+    output_metadata = {
+        **metadata,
+        "omega": best_omega,
+        "omega_min": args.omega_min,
+        "omega_max": args.omega_max,
+        "omega_count": args.omega_count,
+        "pysr_feature_names": ["u_n", "v_n"],
+        "pysr_formula_mapping": (
+            "rho(x,y,t) ~= target_scale * F("
+            "x_n*cos(omega*t) + y_n*sin(omega*t), "
+            "-x_n*sin(omega*t) + y_n*cos(omega*t))"
+        ),
+        "best_metrics": best_metrics,
     }
+    (out_dir / "metadata.json").write_text(json.dumps(output_metadata, indent=2), encoding="utf-8")
 
-    joblib.dump(model, out_dir / "model.pkl")
-    model.equations_.to_csv(out_dir / "equations.csv", index=False)
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-
-    best = model.get_best()
     formula_text = [
         "Selected PySR formula for scaled density:",
-        str(best["equation"]),
+        str(best_model.get_best()["equation"]),
         "",
         "Physical mapping:",
-        f"rho_i ~= {metadata['target_scale']:.12g} * F(r_n, cpsi, spsi, xrot_n, yrot_n)",
-        f"r_n = r / {metadata['r_scale']:.12g}",
-        f"psi = theta - ({metadata['omega']:.12g})*t - ({metadata['phase0']:.12g})",
-        "cpsi = cos(psi)",
-        "spsi = sin(psi)",
-        "xrot_n = r_n*cpsi",
-        "yrot_n = r_n*spsi",
+        f"rho(x,y,t) ~= {target_scale:.12g} * F(u_n, v_n)",
+        f"u_n = x_n*cos(({best_omega:.12g})*t) + y_n*sin(({best_omega:.12g})*t)",
+        f"v_n = -x_n*sin(({best_omega:.12g})*t) + y_n*cos(({best_omega:.12g})*t)",
+        f"x_n = x / {metadata['coordinate_scale']:.12g}",
+        f"y_n = y / {metadata['coordinate_scale']:.12g}",
         "",
-        "Validation metrics:",
-        json.dumps(metrics, indent=2),
+        "Best omega and validation metrics:",
+        json.dumps(best_metrics, indent=2),
     ]
     (out_dir / "formula.txt").write_text("\n".join(formula_text), encoding="utf-8")
 
     print("\n".join(formula_text))
     print(f"\nSaved model to {out_dir / 'model.pkl'}")
-    print(f"Saved equation table to {out_dir / 'equations.csv'}")
+    print(f"Saved metadata to {out_dir / 'metadata.json'}")
+    print(f"Saved omega scan metrics to {out_dir / 'omega_scan_metrics.json'}")
 
 
 if __name__ == "__main__":

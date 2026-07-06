@@ -1,12 +1,30 @@
-# Symbolic regression for the rotating ion-density spoke
+# Direct PySR fit for the rotating ion-density spoke
 
-These scripts are written for Google Colab. They convert the raw
-`rho_i_*.txt` matrices into a compact regression dataset, fit an explicit
-formula with PySR, and render diagnostic plots.
+This Colab workflow keeps preprocessing minimal. It does not smooth,
+interpolate, estimate the spoke phase, or transform the data to a rotating
+frame during preparation.
 
-## 1. Download the GitHub repository in Colab
+The dataset preparation step only builds a compact table:
 
-Run this in a separate Colab cell:
+```text
+x_n, y_n, t_n -> rho_i
+```
+
+The rotating-pattern assumption is imposed during fitting. For each candidate
+angular velocity `omega`, the fit script constructs:
+
+```text
+alpha(t) = omega*t
+
+u_n =  x_n*cos(alpha) + y_n*sin(alpha)
+v_n = -x_n*sin(alpha) + y_n*cos(alpha)
+
+rho_i(x, y, t) ~= target_scale * F(u_n, v_n)
+```
+
+The best `omega` is selected by validation error.
+
+## 1. Clone the repository in Colab
 
 ```python
 REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
@@ -19,157 +37,102 @@ if not os.path.exists(PROJECT_DIR):
 else:
     %cd {PROJECT_DIR}
     !git pull
-```
-
-Then:
-
-```python
-%cd /content/spoke_approximation
-```
-
-If you prefer Google Drive storage for outputs, clone into Drive instead:
-
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-
-REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
-PROJECT_DIR = "/content/drive/MyDrive/spoke_approximation"
-
-import os
-
-if not os.path.exists(PROJECT_DIR):
-    !git clone {REPO_URL} {PROJECT_DIR}
-else:
-    %cd {PROJECT_DIR}
-    !git pull
 
 %cd {PROJECT_DIR}
 ```
 
-## Alternative: Upload data to Colab
-
-Zip the project folder locally or upload just the `data/` folder. In Colab:
-
-```python
-from google.colab import drive
-drive.mount("/content/drive")
-```
-
-Then put the files, for example, in:
-
-```text
-/content/drive/MyDrive/spoke_approximation/data/rho_i_0.txt
-/content/drive/MyDrive/spoke_approximation/data/rho_i_10000.txt
-...
-```
-
-Copy this `colab_scripts/` folder into the same project folder.
-
 ## 2. Install dependencies
 
-PySR uses Julia under the hood. The first run in Colab can take several
-minutes while Julia packages are compiled.
+The first PySR run compiles Julia packages and may take several minutes.
 
 ```python
-%pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib
+%pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib
 ```
 
-## 3. Prepare the stationary rotating dataset
+## 3. Prepare the dataset
 
 ```python
 !python colab_scripts/prepare_spoke_dataset.py \
   --data-dir data \
   --out-dir colab_outputs/prepared \
   --steady-fraction 0.55 \
-  --samples-per-frame 1200 \
+  --samples-per-frame 300 \
+  --domain-eps 0.0 \
   --random-state 7
 ```
 
 Outputs:
 
-- `spoke_dataset.npz`: sampled points and train/validation split.
-- `metadata.json`: grid center, inferred angular velocity, phase, scaling.
-- `angle_fit.png`: phase tracking and fitted rotation rate.
-- `sampled_points.png`: what points were sampled for regression.
+- `colab_outputs/prepared/dataset.npz`
+- `colab_outputs/prepared/metadata.json`
 
-By default coordinates are cell-index coordinates centered on the image.
-If you know physical scales, pass `--dx`, `--dy`, and `--dt`.
+The preparation script removes points outside the nonzero plasma domain and
+samples points from the stationary interval only.
 
-## 4. Fit PySR
+## 4. Fit PySR with omega scan
 
-Start with a quick smoke-test run:
+Start with a short run:
 
 ```python
 !python colab_scripts/fit_spoke_pysr.py \
-  --dataset colab_outputs/prepared/spoke_dataset.npz \
+  --dataset colab_outputs/prepared/dataset.npz \
   --metadata colab_outputs/prepared/metadata.json \
   --out-dir colab_outputs/pysr_run \
+  --omega-min -0.0004 \
+  --omega-max 0.0004 \
+  --omega-count 17 \
   --niterations 80 \
-  --maxsize 25 \
+  --maxsize 30 \
   --populations 8 \
-  --operator-set fast \
-  --batch-size 1024 \
-  --timeout-minutes 12
+  --parsimony 0.003 \
+  --batch-size 512 \
+  --timeout-minutes 20
 ```
 
-For a longer search:
+`--timeout-minutes` is an approximate total budget for the whole omega scan;
+the script divides it across the requested `--omega-count` values.
+
+Outputs:
+
+- `colab_outputs/pysr_run/model.pkl`
+- `colab_outputs/pysr_run/metadata.json`
+- `colab_outputs/pysr_run/formula.txt`
+- `colab_outputs/pysr_run/equations.csv`
+- `colab_outputs/pysr_run/omega_scan_metrics.json`
+
+The PySR operator set is fixed:
 
 ```python
-!python colab_scripts/fit_spoke_pysr.py \
-  --dataset colab_outputs/prepared/spoke_dataset.npz \
-  --metadata colab_outputs/prepared/metadata.json \
-  --out-dir colab_outputs/pysr_run_long \
-  --niterations 2500 \
-  --maxsize 55 \
-  --populations 40 \
-  --operator-set balanced \
-  --batch-size 2048 \
-  --timeout-minutes 90
+binary_operators = ["+", "-", "*", "/"]
+unary_operators = ["sqrt", "abs", "exp"]
 ```
 
-The fitted expression uses normalized features:
-
-```text
-r_n      = r / r_scale
-cpsi     = cos(theta - omega*t - phase0)
-spsi     = sin(theta - omega*t - phase0)
-xrot_n   = r_n*cpsi
-yrot_n   = r_n*spsi
-```
-
-The physical formula is therefore:
-
-```text
-rho_i(x, y, t) ~= target_scale * F(r_n, cpsi, spsi, xrot_n, yrot_n)
-```
-
-where `omega`, `phase0`, `r_scale`, and `target_scale` are stored in
-`metadata.json`.
-
-## 5. Evaluate and visualize
+## 5. Evaluate on full frames
 
 ```python
 !python colab_scripts/evaluate_spoke_formula.py \
   --model colab_outputs/pysr_run/model.pkl \
-  --metadata colab_outputs/prepared/metadata.json \
+  --metadata colab_outputs/pysr_run/metadata.json \
   --data-dir data \
-  --out-dir colab_outputs/evaluation \
-  --frames 1200000 1500000 1800000 1990000
+  --out-dir colab_outputs/evaluation
 ```
 
-Outputs:
+Display results:
 
-- `formula.txt`: selected PySR formula plus the physical coordinate mapping.
-- `metrics.csv`: frame-by-frame errors.
-- `comparison_*.png`: data, formula prediction, residuals.
+```python
+from IPython.display import Image, display
+import glob
+
+print(open("colab_outputs/pysr_run/formula.txt").read())
+
+for path in sorted(glob.glob("colab_outputs/evaluation/comparison_*.png")):
+    display(Image(path))
+```
 
 ## Notes
 
-- The animation script visualizes `abs(rho_i)`, so these scripts also use
-  `abs(rho_i)` by default. Pass `--signed-target` to fit signed values instead.
-- If the spoke is not fully stationary at 55% of the sequence, increase
-  `--steady-fraction`, for example to `0.65` or `0.75`.
-- If PySR finds formulas that are too complicated, increase `--parsimony` or
-  lower `--maxsize`.
-- If small fluctuations dominate, raise `--smooth-sigma` in dataset preparation.
+- No smoothing is applied.
+- No interpolation is applied.
+- No phase tracking is performed during preparation.
+- `phi0` is omitted in the first version because a constant phase shift is
+  absorbed by the learned spatial function `F(u_n, v_n)`.
