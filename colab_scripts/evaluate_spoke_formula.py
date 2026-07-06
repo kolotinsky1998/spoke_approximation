@@ -114,7 +114,7 @@ def main() -> None:
             {
                 "step": step,
                 "mae": mean_absolute_error(flat_target, flat_pred),
-                "rmse": mean_squared_error(flat_target, flat_pred, squared=False),
+                "rmse": float(np.sqrt(mean_squared_error(flat_target, flat_pred))),
                 "r2": r2_score(flat_target, flat_pred),
                 "target_max": float(np.max(target)),
                 "pred_max": float(np.max(pred)),

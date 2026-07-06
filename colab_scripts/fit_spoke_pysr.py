@@ -113,16 +113,18 @@ def main() -> None:
 
     pred_train = model.predict(X_train)
     pred_val = model.predict(X_val)
+    train_rmse_scaled = float(np.sqrt(mean_squared_error(y_train, pred_train)))
+    val_rmse_scaled = float(np.sqrt(mean_squared_error(y_val, pred_val)))
     metrics = {
         "train_mae_scaled": float(mean_absolute_error(y_train, pred_train)),
-        "train_rmse_scaled": float(mean_squared_error(y_train, pred_train, squared=False)),
+        "train_rmse_scaled": train_rmse_scaled,
         "train_r2": float(r2_score(y_train, pred_train)),
         "val_mae_scaled": float(mean_absolute_error(y_val, pred_val)),
-        "val_rmse_scaled": float(mean_squared_error(y_val, pred_val, squared=False)),
+        "val_rmse_scaled": val_rmse_scaled,
         "val_r2": float(r2_score(y_val, pred_val)),
         "target_scale": metadata["target_scale"],
         "val_mae_physical": float(mean_absolute_error(y_val, pred_val) * metadata["target_scale"]),
-        "val_rmse_physical": float(mean_squared_error(y_val, pred_val, squared=False) * metadata["target_scale"]),
+        "val_rmse_physical": float(val_rmse_scaled * metadata["target_scale"]),
     }
 
     joblib.dump(model, out_dir / "model.pkl")
