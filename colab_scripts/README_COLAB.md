@@ -4,7 +4,50 @@ These scripts are written for Google Colab. They convert the raw
 `rho_i_*.txt` matrices into a compact regression dataset, fit an explicit
 formula with PySR, and render diagnostic plots.
 
-## 1. Upload data to Colab
+## 1. Download the GitHub repository in Colab
+
+Run this in a separate Colab cell:
+
+```python
+REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
+PROJECT_DIR = "/content/spoke_approximation"
+
+import os
+
+if not os.path.exists(PROJECT_DIR):
+    !git clone {REPO_URL} {PROJECT_DIR}
+else:
+    %cd {PROJECT_DIR}
+    !git pull
+```
+
+Then:
+
+```python
+%cd /content/spoke_approximation
+```
+
+If you prefer Google Drive storage for outputs, clone into Drive instead:
+
+```python
+from google.colab import drive
+drive.mount("/content/drive")
+
+REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
+PROJECT_DIR = "/content/drive/MyDrive/spoke_approximation"
+
+import os
+
+if not os.path.exists(PROJECT_DIR):
+    !git clone {REPO_URL} {PROJECT_DIR}
+else:
+    %cd {PROJECT_DIR}
+    !git pull
+
+%cd {PROJECT_DIR}
+```
+
+## Alternative: Upload data to Colab
 
 Zip the project folder locally or upload just the `data/` folder. In Colab:
 
@@ -28,16 +71,14 @@ Copy this `colab_scripts/` folder into the same project folder.
 PySR uses Julia under the hood. The first run in Colab can take several
 minutes while Julia packages are compiled.
 
-```bash
-pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib
+```python
+%pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib
 ```
 
 ## 3. Prepare the stationary rotating dataset
 
-```bash
-cd /content/drive/MyDrive/spoke_approximation
-
-python colab_scripts/prepare_spoke_dataset.py \
+```python
+!python colab_scripts/prepare_spoke_dataset.py \
   --data-dir data \
   --out-dir colab_outputs/prepared \
   --steady-fraction 0.55 \
@@ -57,27 +98,30 @@ If you know physical scales, pass `--dx`, `--dy`, and `--dt`.
 
 ## 4. Fit PySR
 
-Start with a modest run:
+Start with a quick smoke-test run:
 
-```bash
-python colab_scripts/fit_spoke_pysr.py \
+```python
+!python colab_scripts/fit_spoke_pysr.py \
   --dataset colab_outputs/prepared/spoke_dataset.npz \
   --metadata colab_outputs/prepared/metadata.json \
   --out-dir colab_outputs/pysr_run \
-  --niterations 400 \
-  --maxsize 35
+  --niterations 80 \
+  --maxsize 25 \
+  --populations 8 \
+  --timeout-minutes 12
 ```
 
 For a longer search:
 
-```bash
-python colab_scripts/fit_spoke_pysr.py \
+```python
+!python colab_scripts/fit_spoke_pysr.py \
   --dataset colab_outputs/prepared/spoke_dataset.npz \
   --metadata colab_outputs/prepared/metadata.json \
   --out-dir colab_outputs/pysr_run_long \
   --niterations 2500 \
   --maxsize 55 \
-  --populations 40
+  --populations 40 \
+  --timeout-minutes 90
 ```
 
 The fitted expression uses normalized features:
@@ -101,8 +145,8 @@ where `omega`, `phase0`, `r_scale`, and `target_scale` are stored in
 
 ## 5. Evaluate and visualize
 
-```bash
-python colab_scripts/evaluate_spoke_formula.py \
+```python
+!python colab_scripts/evaluate_spoke_formula.py \
   --model colab_outputs/pysr_run/model.pkl \
   --metadata colab_outputs/prepared/metadata.json \
   --data-dir data \

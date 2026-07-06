@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--populations", type=int, default=24)
     parser.add_argument("--maxsize", type=int, default=45)
     parser.add_argument("--parsimony", type=float, default=0.002)
+    parser.add_argument("--timeout-minutes", type=float, default=None, help="Stop PySR after this many minutes.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--procs", type=int, default=0, help="Julia worker processes. 0 lets PySR choose.")
     return parser.parse_args()
@@ -81,6 +82,8 @@ def main() -> None:
     )
     if args.procs > 0:
         model_kwargs["procs"] = args.procs
+    if args.timeout_minutes is not None:
+        model_kwargs["timeout_in_seconds"] = args.timeout_minutes * 60.0
 
     model = PySRRegressor(**model_kwargs)
     model.fit(X_train, y_train, variable_names=feature_names)

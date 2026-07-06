@@ -1,15 +1,21 @@
 # %% [markdown]
 # # Rotating spoke symbolic regression with PySR
 #
-# Copy this file into a Colab notebook cell-by-cell, or run the shell commands
-# directly from a Colab terminal. Adjust `PROJECT_DIR` if your data is elsewhere.
+# Copy this file into a Colab notebook cell-by-cell. The first cell downloads
+# the GitHub repository into Colab.
 
 # %%
-from google.colab import drive
-drive.mount("/content/drive")
+REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
+PROJECT_DIR = "/content/spoke_approximation"
 
 # %%
-PROJECT_DIR = "/content/drive/MyDrive/spoke_approximation"
+import os
+
+if not os.path.exists(PROJECT_DIR):
+    !git clone {REPO_URL} {PROJECT_DIR}
+else:
+    %cd {PROJECT_DIR}
+    !git pull
 
 # %%
 %pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib
@@ -31,10 +37,11 @@ PROJECT_DIR = "/content/drive/MyDrive/spoke_approximation"
   --dataset colab_outputs/prepared/spoke_dataset.npz \
   --metadata colab_outputs/prepared/metadata.json \
   --out-dir colab_outputs/pysr_run \
-  --niterations 800 \
-  --maxsize 45 \
-  --populations 24 \
-  --parsimony 0.002
+  --niterations 80 \
+  --maxsize 25 \
+  --populations 8 \
+  --parsimony 0.004 \
+  --timeout-minutes 12
 
 # %%
 !python colab_scripts/evaluate_spoke_formula.py \
