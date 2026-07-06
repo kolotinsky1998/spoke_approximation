@@ -27,13 +27,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--center-x", type=float, default=None, help="Grid center x in cell-index units.")
     parser.add_argument("--center-y", type=float, default=None, help="Grid center y in cell-index units.")
     parser.add_argument("--domain-eps", type=float, default=0.0, help="Cells with abs(rho_i) <= this are excluded.")
-    parser.add_argument("--n-samples", type=int, default=3000, help="Random training/validation samples from the last frame.")
+    parser.add_argument("--n-samples", type=int, default=0, help="Random samples from the last frame. Use 0 to use all domain cells.")
     parser.add_argument("--validation-size", type=float, default=0.2, help="Validation fraction.")
     parser.add_argument("--signed-target", action="store_true", help="Fit signed rho_i instead of abs(rho_i).")
     parser.add_argument("--niterations", type=int, default=200)
     parser.add_argument("--populations", type=int, default=12)
     parser.add_argument("--maxsize", type=int, default=40)
     parser.add_argument("--parsimony", type=float, default=0.001)
+    parser.add_argument(
+        "--model-selection",
+        choices=["accuracy", "best", "score"],
+        default="accuracy",
+        help="How PySR selects the final equation.",
+    )
+    parser.add_argument("--top-equations", type=int, default=8, help="Number of best equations to print by loss.")
+    parser.add_argument("--include-trig", action="store_true", help="Also allow sin/cos of spatial expressions.")
     parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
     parser.add_argument("--timeout-minutes", type=float, default=None, help="PySR time budget in minutes.")
     parser.add_argument("--show-pysr-output", action="store_true", help="Show raw PySR/Julia output instead of writing it to a log file.")
@@ -89,6 +97,16 @@ def split_dataset(
     if train_idx.size == 0:
         raise ValueError("Training split is empty. Lower --validation-size or increase --n-samples.")
     return X[train_idx], X[val_idx], y[train_idx], y[val_idx]
+
+
+def choose_samples(
+    rng: np.random.Generator,
+    candidates: np.ndarray,
+    n_samples: int,
+) -> np.ndarray:
+    if n_samples <= 0 or n_samples >= candidates.size:
+        return candidates
+    return rng.choice(candidates, size=n_samples, replace=False)
 
 
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray, target_scale: float, prefix: str) -> dict:
@@ -156,29 +174,41 @@ def main() -> None:
         target_scale = 1.0
 
     candidates = np.flatnonzero(domain_mask.ravel())
-    replace = args.n_samples > candidates.size
-    picked = rng.choice(candidates, size=args.n_samples, replace=replace)
+    picked = choose_samples(rng, candidates, args.n_samples)
     iy, ix = np.unravel_index(picked, target.shape)
     X = np.column_stack([x[iy, ix] / coordinate_scale, y_grid[iy, ix] / coordinate_scale])
     y_scaled = target[iy, ix] / target_scale
     X_train, X_val, y_train, y_val = split_dataset(rng, X, y_scaled, args.validation_size)
+
+    unary_operators = ["sqrt", "abs", "exp"]
+    constraints = {
+        "sqrt": 9,
+        "exp": 9,
+        "/": (-1, 9),
+    }
+    nested_constraints = {
+        "exp": {"exp": 0},
+    }
+    if args.include_trig:
+        unary_operators += ["sin", "cos"]
+        constraints.update({"sin": 9, "cos": 9})
+        nested_constraints.update(
+            {
+                "sin": {"sin": 0, "cos": 0, "exp": 0},
+                "cos": {"sin": 0, "cos": 0, "exp": 0},
+            }
+        )
 
     model_kwargs = dict(
         niterations=args.niterations,
         populations=args.populations,
         maxsize=args.maxsize,
         parsimony=args.parsimony,
-        model_selection="best",
+        model_selection=args.model_selection,
         binary_operators=["+", "-", "*", "/"],
-        unary_operators=["sqrt", "abs", "exp"],
-        constraints={
-            "sqrt": 9,
-            "exp": 9,
-            "/": (-1, 9),
-        },
-        nested_constraints={
-            "exp": {"exp": 0},
-        },
+        unary_operators=unary_operators,
+        constraints=constraints,
+        nested_constraints=nested_constraints,
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
         random_state=args.random_state,
         turbo=args.turbo,
@@ -231,12 +261,20 @@ def main() -> None:
         "target_scale": target_scale,
         "target_kind": "signed_rho_i" if args.signed_target else "abs_rho_i",
         "feature_names": ["x_n", "y_n"],
+        "model_selection": args.model_selection,
+        "unary_operators": unary_operators,
         "metrics": metrics,
     }
 
     joblib.dump(model, out_dir / "model.pkl")
     model.equations_.to_csv(out_dir / "equations.csv", index=False)
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    equation_rows = model.equations_.sort_values("loss", ascending=True).head(args.top_equations)
+    top_lines = [
+        f"complexity={row['complexity']} loss={row['loss']:.6g} equation={row['equation']}"
+        for _, row in equation_rows.iterrows()
+    ]
 
     formula_text = [
         "Selected PySR formula for scaled last-frame density:",
@@ -247,6 +285,9 @@ def main() -> None:
         f"x_n = x / {coordinate_scale:.12g}",
         f"y_n = y / {coordinate_scale:.12g}",
         "",
+        "Top equations by loss:",
+        *top_lines,
+        "",
         "Validation metrics:",
         json.dumps(metrics, indent=2),
     ]
@@ -254,14 +295,17 @@ def main() -> None:
 
     vmax = np.percentile(target[mask], 99.5)
     lim = max(np.percentile(np.abs(residual[mask]), 99.0), 1e-12)
+    target_plot = np.where(mask, target, np.nan)
+    pred_plot = np.where(mask, pred, np.nan)
+    residual_plot = np.where(mask, residual, np.nan)
     fig, ax = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
-    im0 = ax[0].imshow(target, origin="lower", cmap="magma", vmax=vmax)
+    im0 = ax[0].imshow(target_plot, origin="lower", cmap="magma", vmax=vmax)
     ax[0].set_title(f"data step={step}")
     fig.colorbar(im0, ax=ax[0], fraction=0.046)
-    im1 = ax[1].imshow(pred, origin="lower", cmap="magma", vmax=vmax)
+    im1 = ax[1].imshow(pred_plot, origin="lower", cmap="magma", vmax=vmax)
     ax[1].set_title("PySR formula")
     fig.colorbar(im1, ax=ax[1], fraction=0.046)
-    im2 = ax[2].imshow(residual, origin="lower", cmap="coolwarm", vmin=-lim, vmax=lim)
+    im2 = ax[2].imshow(residual_plot, origin="lower", cmap="coolwarm", vmin=-lim, vmax=lim)
     ax[2].set_title("prediction - data")
     fig.colorbar(im2, ax=ax[2], fraction=0.046)
     for axis in ax:

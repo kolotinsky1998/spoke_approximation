@@ -143,13 +143,14 @@ without any time dependence:
 !python colab_scripts/fit_last_frame_pysr.py \
   --data-dir data \
   --out-dir colab_outputs/pysr_last_frame \
-  --n-samples 3000 \
-  --niterations 200 \
-  --maxsize 40 \
-  --populations 12 \
-  --parsimony 0.001 \
+  --n-samples 0 \
+  --niterations 500 \
+  --maxsize 60 \
+  --populations 20 \
+  --parsimony 0.0003 \
+  --model-selection accuracy \
   --batch-size 512 \
-  --timeout-minutes 15
+  --timeout-minutes 25
 ```
 
 Display:
