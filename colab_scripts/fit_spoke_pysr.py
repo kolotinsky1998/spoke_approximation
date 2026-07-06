@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
     parser.add_argument("--timeout-minutes", type=float, default=None, help="Approximate total PySR time budget across the omega scan.")
     parser.add_argument("--show-pysr-output", action="store_true", help="Show raw PySR/Julia output instead of writing it to log files.")
+    parser.add_argument("--turbo", action="store_true", help="Enable PySR turbo mode. Faster, but may print Julia LoopVectorization warnings.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--procs", type=int, default=0, help="Julia worker processes. 0 lets PySR choose.")
     return parser.parse_args()
@@ -146,7 +147,8 @@ def main() -> None:
         },
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
         random_state=args.random_state,
-        turbo=True,
+        turbo=args.turbo,
+        progress=False,
         verbosity=0,
     )
     if args.procs > 0:
@@ -183,9 +185,9 @@ def main() -> None:
             flush=True,
         )
 
-        model = PySRRegressor(output_directory=str(run_dir), **model_kwargs)
         try:
             with redirect_process_output(log_path, enabled=not args.show_pysr_output):
+                model = PySRRegressor(output_directory=str(run_dir), **model_kwargs)
                 model.fit(X_train, y_train, variable_names=["u_n", "v_n"])
         except Exception as exc:
             print(f"[{run_idx + 1}/{len(omega_values)}] omega={omega:.12g} failed: {exc}", flush=True)

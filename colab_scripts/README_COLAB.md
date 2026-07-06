@@ -134,6 +134,33 @@ for path in sorted(glob.glob("colab_outputs/evaluation/comparison_*.png")):
     display(Image(path))
 ```
 
+## Optional: fit only the last frame
+
+This diagnostic checks whether PySR can approximate a single stationary frame
+without any time dependence:
+
+```python
+!python colab_scripts/fit_last_frame_pysr.py \
+  --data-dir data \
+  --out-dir colab_outputs/pysr_last_frame \
+  --n-samples 3000 \
+  --niterations 200 \
+  --maxsize 40 \
+  --populations 12 \
+  --parsimony 0.001 \
+  --batch-size 512 \
+  --timeout-minutes 15
+```
+
+Display:
+
+```python
+from IPython.display import Image, display
+
+print(open("colab_outputs/pysr_last_frame/formula.txt").read())
+display(Image("colab_outputs/pysr_last_frame/comparison_last_frame.png"))
+```
+
 ## Notes
 
 - No smoothing is applied.
