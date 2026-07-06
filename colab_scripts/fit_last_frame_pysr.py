@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
         help="How PySR selects the final equation.",
     )
     parser.add_argument("--top-equations", type=int, default=8, help="Number of best equations to print by loss.")
+    parser.add_argument("--include-abs", action="store_true", help="Allow abs. Can create piecewise ray-like artifacts.")
     parser.add_argument("--include-trig", action="store_true", help="Also allow sin/cos of spatial expressions.")
     parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
     parser.add_argument("--timeout-minutes", type=float, default=None, help="PySR time budget in minutes.")
@@ -180,7 +181,7 @@ def main() -> None:
     y_scaled = target[iy, ix] / target_scale
     X_train, X_val, y_train, y_val = split_dataset(rng, X, y_scaled, args.validation_size)
 
-    unary_operators = ["sqrt", "abs", "exp"]
+    unary_operators = ["sqrt", "exp"]
     constraints = {
         "sqrt": 9,
         "exp": 9,
@@ -198,6 +199,8 @@ def main() -> None:
                 "cos": {"sin": 0, "cos": 0, "exp": 0},
             }
         )
+    if args.include_abs:
+        unary_operators.append("abs")
 
     model_kwargs = dict(
         niterations=args.niterations,

@@ -105,7 +105,7 @@ Outputs:
 - `colab_outputs/pysr_run/omega_scan_metrics.json`
 - `colab_outputs/pysr_run/pysr_logs/omega_*.log`
 
-The PySR operator set is fixed:
+The time-dependent PySR operator set is fixed:
 
 ```python
 binary_operators = ["+", "-", "*", "/"]
@@ -152,6 +152,10 @@ without any time dependence:
   --batch-size 512 \
   --timeout-minutes 25
 ```
+
+By default this last-frame diagnostic excludes `abs`, because it often creates
+piecewise ray-like artifacts. Add `--include-abs` only when you deliberately
+want piecewise formulas.
 
 Display:
 
