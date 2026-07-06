@@ -41,6 +41,8 @@ else:
   --maxsize 25 \
   --populations 8 \
   --parsimony 0.004 \
+  --operator-set fast \
+  --batch-size 1024 \
   --timeout-minutes 12
 
 # %%

@@ -22,6 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--maxsize", type=int, default=45)
     parser.add_argument("--parsimony", type=float, default=0.002)
     parser.add_argument("--timeout-minutes", type=float, default=None, help="Stop PySR after this many minutes.")
+    parser.add_argument(
+        "--operator-set",
+        choices=["fast", "balanced", "full"],
+        default="balanced",
+        help="Operator set for PySR. 'fast' is best for first Colab checks.",
+    )
+    parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--procs", type=int, default=0, help="Julia worker processes. 0 lets PySR choose.")
     return parser.parse_args()
@@ -48,32 +55,45 @@ def main() -> None:
     feature_names = [str(x) for x in data["feature_names"]]
     metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
 
+    if args.operator_set == "fast":
+        binary_operators = ["+", "-", "*"]
+        unary_operators = []
+        constraints = {}
+        nested_constraints = {}
+    elif args.operator_set == "balanced":
+        binary_operators = ["+", "-", "*", "/"]
+        unary_operators = ["sqrt", "abs"]
+        constraints = {
+            "sqrt": 9,
+            "/": (-1, 9),
+        }
+        nested_constraints = {}
+    else:
+        binary_operators = ["+", "-", "*", "/"]
+        unary_operators = ["sin", "cos", "exp", "sqrt", "abs"]
+        constraints = {
+            "exp": 9,
+            "sin": 9,
+            "cos": 9,
+            "sqrt": 9,
+            "/": (-1, 9),
+        }
+        nested_constraints = {
+            "sin": {"sin": 0, "cos": 0, "exp": 0},
+            "cos": {"sin": 0, "cos": 0, "exp": 0},
+            "exp": {"exp": 0},
+        }
+
     model_kwargs = dict(
         niterations=args.niterations,
         populations=args.populations,
         maxsize=args.maxsize,
         parsimony=args.parsimony,
         model_selection="best",
-        binary_operators=["+", "-", "*", "/"],
-        unary_operators=[
-            "sin",
-            "cos",
-            "exp",
-            "sqrt",
-            "abs",
-        ],
-        constraints={
-            "exp": 9,
-            "sin": 9,
-            "cos": 9,
-            "sqrt": 9,
-            "/": (-1, 9),
-        },
-        nested_constraints={
-            "sin": {"sin": 0, "cos": 0, "exp": 0},
-            "cos": {"sin": 0, "cos": 0, "exp": 0},
-            "exp": {"exp": 0},
-        },
+        binary_operators=binary_operators,
+        unary_operators=unary_operators,
+        constraints=constraints,
+        nested_constraints=nested_constraints,
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
         random_state=args.random_state,
         turbo=True,
@@ -84,6 +104,9 @@ def main() -> None:
         model_kwargs["procs"] = args.procs
     if args.timeout_minutes is not None:
         model_kwargs["timeout_in_seconds"] = args.timeout_minutes * 60.0
+    if args.batch_size is not None:
+        model_kwargs["batching"] = True
+        model_kwargs["batch_size"] = args.batch_size
 
     model = PySRRegressor(**model_kwargs)
     model.fit(X_train, y_train, variable_names=feature_names)

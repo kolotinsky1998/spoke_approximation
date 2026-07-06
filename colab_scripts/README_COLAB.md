@@ -108,6 +108,8 @@ Start with a quick smoke-test run:
   --niterations 80 \
   --maxsize 25 \
   --populations 8 \
+  --operator-set fast \
+  --batch-size 1024 \
   --timeout-minutes 12
 ```
 
@@ -121,6 +123,8 @@ For a longer search:
   --niterations 2500 \
   --maxsize 55 \
   --populations 40 \
+  --operator-set balanced \
+  --batch-size 2048 \
   --timeout-minutes 90
 ```
 
