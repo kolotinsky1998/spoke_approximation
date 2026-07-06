@@ -92,6 +92,10 @@ Start with a short run:
 `--timeout-minutes` is an approximate total budget for the whole omega scan;
 the script divides it across the requested `--omega-count` values.
 
+By default, raw PySR/Julia progress bars are written to log files instead of
+Colab output. The notebook output only shows one compact progress line per
+omega value. Add `--show-pysr-output` only when debugging PySR itself.
+
 Outputs:
 
 - `colab_outputs/pysr_run/model.pkl`
@@ -99,6 +103,7 @@ Outputs:
 - `colab_outputs/pysr_run/formula.txt`
 - `colab_outputs/pysr_run/equations.csv`
 - `colab_outputs/pysr_run/omega_scan_metrics.json`
+- `colab_outputs/pysr_run/pysr_logs/omega_*.log`
 
 The PySR operator set is fixed:
 

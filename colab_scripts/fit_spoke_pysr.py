@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
+import sys
+import time
 from pathlib import Path
 
 import joblib
@@ -25,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parsimony", type=float, default=0.003)
     parser.add_argument("--batch-size", type=int, default=None, help="Use PySR mini-batches of this size.")
     parser.add_argument("--timeout-minutes", type=float, default=None, help="Approximate total PySR time budget across the omega scan.")
+    parser.add_argument("--show-pysr-output", action="store_true", help="Show raw PySR/Julia output instead of writing it to log files.")
     parser.add_argument("--random-state", type=int, default=7)
     parser.add_argument("--procs", type=int, default=0, help="Julia worker processes. 0 lets PySR choose.")
     return parser.parse_args()
@@ -57,6 +62,47 @@ def metrics_dict(y_true: np.ndarray, y_pred: np.ndarray, target_scale: float, pr
     }
 
 
+@contextlib.contextmanager
+def redirect_process_output(log_path: Path, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    try:
+        with log_path.open("ab") as log_file:
+            os.dup2(log_file.fileno(), 1)
+            os.dup2(log_file.fileno(), 2)
+            yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {sec:02d}s"
+    return f"{minutes:d}m {sec:02d}s"
+
+
+def log_tail(path: Path, n_lines: int = 40) -> str:
+    if not path.exists():
+        return ""
+    lines = path.read_text(errors="replace").splitlines()
+    return "\n".join(lines[-n_lines:])
+
+
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -67,7 +113,7 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit(
             "PySR is not installed. In Colab run:\n"
-            '  %pip install -U "pysr==1.5.9" numpy pandas scipy scikit-learn matplotlib joblib'
+            '  %pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib'
         ) from exc
 
     data = np.load(args.dataset, allow_pickle=True)
@@ -101,7 +147,7 @@ def main() -> None:
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
         random_state=args.random_state,
         turbo=True,
-        verbosity=1,
+        verbosity=0,
     )
     if args.procs > 0:
         model_kwargs["procs"] = args.procs
@@ -113,14 +159,40 @@ def main() -> None:
 
     runs = []
     best_record = None
+    scan_start = time.monotonic()
+    print(f"Starting omega scan: {len(omega_values)} values")
+    print(f"PySR output is written to: {out_dir / 'pysr_logs'}")
     for run_idx, omega in enumerate(omega_values):
         run_dir = out_dir / "pysr_outputs" / f"omega_{run_idx:03d}"
+        log_path = out_dir / "pysr_logs" / f"omega_{run_idx:03d}.log"
         run_dir.mkdir(parents=True, exist_ok=True)
         X_train = rotating_features(X_train_raw, float(omega), metadata)
         X_val = rotating_features(X_val_raw, float(omega), metadata)
 
+        omega_start = time.monotonic()
+        completed = run_idx
+        if completed > 0:
+            avg = (omega_start - scan_start) / completed
+            eta = avg * (len(omega_values) - completed)
+            eta_text = format_duration(eta)
+        else:
+            eta_text = "estimating"
+        print(
+            f"[{run_idx + 1}/{len(omega_values)}] "
+            f"omega={omega:.12g} started | elapsed={format_duration(omega_start - scan_start)} | eta={eta_text}",
+            flush=True,
+        )
+
         model = PySRRegressor(output_directory=str(run_dir), **model_kwargs)
-        model.fit(X_train, y_train, variable_names=["u_n", "v_n"])
+        try:
+            with redirect_process_output(log_path, enabled=not args.show_pysr_output):
+                model.fit(X_train, y_train, variable_names=["u_n", "v_n"])
+        except Exception as exc:
+            print(f"[{run_idx + 1}/{len(omega_values)}] omega={omega:.12g} failed: {exc}", flush=True)
+            tail = log_tail(log_path)
+            if tail:
+                print(f"Last PySR log lines from {log_path}:\n{tail}", flush=True)
+            raise
         pred_train = model.predict(X_train)
         pred_val = model.predict(X_val)
 
@@ -136,10 +208,18 @@ def main() -> None:
         if best_record is None or record["val_rmse_scaled"] < best_record["metrics"]["val_rmse_scaled"]:
             best_record = {"omega": float(omega), "model": model, "metrics": record}
 
+        elapsed = time.monotonic() - scan_start
+        per_run = elapsed / (run_idx + 1)
+        remaining = per_run * (len(omega_values) - run_idx - 1)
+        best_rmse = best_record["metrics"]["val_rmse_physical"]
         print(
-            f"omega={omega:.12g} "
-            f"val_rmse={record['val_rmse_physical']:.6g} "
-            f"val_r2={record['val_r2']:.4f}"
+            f"[{run_idx + 1}/{len(omega_values)}] "
+            f"done in {format_duration(time.monotonic() - omega_start)} | "
+            f"val_rmse={record['val_rmse_physical']:.6g} | "
+            f"val_r2={record['val_r2']:.4f} | "
+            f"best_rmse={best_rmse:.6g} | "
+            f"remaining~{format_duration(remaining)}",
+            flush=True,
         )
 
     if best_record is None:
