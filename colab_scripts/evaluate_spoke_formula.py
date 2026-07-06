@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a fitted rotating-coordinate PySR formula on full frames."""
+"""Evaluate a fitted PySR rho_i(x, y, t) formula on full frames."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import json
 import re
 from pathlib import Path
 
-import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -41,17 +40,13 @@ def make_grid(shape: tuple[int, int], metadata: dict) -> tuple[np.ndarray, np.nd
     return x, y
 
 
-def rotating_features(shape: tuple[int, int], step: int, metadata: dict) -> np.ndarray:
+def template_features(shape: tuple[int, int], step: int, metadata: dict) -> np.ndarray:
     x, y = make_grid(shape, metadata)
     x_n = x.ravel() / metadata["coordinate_scale"]
     y_n = y.ravel() / metadata["coordinate_scale"]
-    t = step * metadata["dt"]
-    alpha = metadata["omega"] * t
-    c = np.cos(alpha)
-    s = np.sin(alpha)
-    u_n = x_n * c + y_n * s
-    v_n = -x_n * s + y_n * c
-    return np.column_stack([u_n, v_n])
+    t_phys = step * metadata["dt"]
+    tau = np.full_like(x_n, (t_phys - metadata["t0"]) / metadata["t_scale"], dtype=float)
+    return np.column_stack([x_n, y_n, tau])
 
 
 def load_target(path: Path, signed_target: bool) -> np.ndarray:
@@ -83,6 +78,14 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
+        import joblib
+    except ImportError as exc:
+        raise SystemExit(
+            "joblib is not installed. In Colab run:\n"
+            '  %pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib tensorboard'
+        ) from exc
+
     model = joblib.load(args.model)
     metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
     paths = sorted(Path(args.data_dir).glob(args.pattern), key=extract_step)
@@ -101,11 +104,13 @@ def main() -> None:
         str(model.get_best()["equation"]),
         "",
         "Physical mapping:",
-        f"rho(x,y,t) ~= {metadata['target_scale']:.12g} * F(u_n, v_n)",
-        f"u_n = x_n*cos(({metadata['omega']:.12g})*t) + y_n*sin(({metadata['omega']:.12g})*t)",
-        f"v_n = -x_n*sin(({metadata['omega']:.12g})*t) + y_n*cos(({metadata['omega']:.12g})*t)",
+        f"rho(x,y,t) ~= {metadata['target_scale']:.12g} * template(x_n, y_n, tau)",
+        "tau = (t_phys - t0) / t_scale",
+        f"t0 = {metadata['t0']:.12g}",
+        f"t_scale = {metadata['t_scale']:.12g}",
         f"x_n = x / {metadata['coordinate_scale']:.12g}",
         f"y_n = y / {metadata['coordinate_scale']:.12g}",
+        metadata.get("template_combine", ""),
     ]
     (out_dir / "formula.txt").write_text("\n".join(formula_lines), encoding="utf-8")
 
@@ -116,7 +121,7 @@ def main() -> None:
             continue
         target = load_target(by_step[step], args.signed_target)
         mask = evaluation_mask(target, metadata)
-        X = rotating_features(target.shape, step, metadata)
+        X = template_features(target.shape, step, metadata)
         pred = model.predict(X).reshape(target.shape) * metadata["target_scale"]
         residual = pred - target
 
@@ -136,14 +141,18 @@ def main() -> None:
 
         vmax = np.percentile(target[mask], 99.5) if np.any(mask) else np.max(target)
         lim = max(np.percentile(np.abs(residual[mask]), 99.0), 1e-12)
+        target_plot = np.where(mask, target, np.nan)
+        pred_plot = np.where(mask, pred, np.nan)
+        residual_plot = np.where(mask, residual, np.nan)
+
         fig, ax = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
-        im0 = ax[0].imshow(target, origin="lower", cmap="magma", vmax=vmax)
+        im0 = ax[0].imshow(target_plot, origin="lower", cmap="magma", vmax=vmax)
         ax[0].set_title(f"data step={step}")
         fig.colorbar(im0, ax=ax[0], fraction=0.046)
-        im1 = ax[1].imshow(pred, origin="lower", cmap="magma", vmax=vmax)
+        im1 = ax[1].imshow(pred_plot, origin="lower", cmap="magma", vmax=vmax)
         ax[1].set_title("PySR formula")
         fig.colorbar(im1, ax=ax[1], fraction=0.046)
-        im2 = ax[2].imshow(residual, origin="lower", cmap="coolwarm", vmin=-lim, vmax=lim)
+        im2 = ax[2].imshow(residual_plot, origin="lower", cmap="coolwarm", vmin=-lim, vmax=lim)
         ax[2].set_title("prediction - data")
         fig.colorbar(im2, ax=ax[2], fraction=0.046)
         for axis in ax:

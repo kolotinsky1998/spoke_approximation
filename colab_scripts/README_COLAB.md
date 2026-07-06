@@ -10,19 +10,19 @@ The dataset preparation step only builds a compact table:
 x_n, y_n, t_n -> rho_i
 ```
 
-The rotating-pattern assumption is imposed during fitting. For each candidate
-angular velocity `omega`, the fit script constructs:
+The rotating-pattern assumption is imposed during fitting with
+`TemplateExpressionSpec`. PySR optimizes the angular phase parameters inside
+the search rather than scanning `omega` on a fixed grid:
 
 ```text
-alpha(t) = omega*t
+tau = (t - t0) / t_scale
+alpha(t) = omega*tau + phi
 
 u_n =  x_n*cos(alpha) + y_n*sin(alpha)
 v_n = -x_n*sin(alpha) + y_n*cos(alpha)
 
 rho_i(x, y, t) ~= target_scale * F(u_n, v_n)
 ```
-
-The best `omega` is selected by validation error.
 
 ## 1. Clone the repository in Colab
 
@@ -46,7 +46,7 @@ else:
 The first PySR run compiles Julia packages and may take several minutes.
 
 ```python
-%pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib
+%pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib tensorboard
 ```
 
 ## 3. Prepare the dataset
@@ -56,7 +56,7 @@ The first PySR run compiles Julia packages and may take several minutes.
   --data-dir data \
   --out-dir colab_outputs/prepared \
   --steady-fraction 0.55 \
-  --samples-per-frame 300 \
+  --samples-per-frame 120 \
   --domain-eps 0.0 \
   --random-state 7
 ```
@@ -69,7 +69,11 @@ Outputs:
 The preparation script removes points outside the nonzero plasma domain and
 samples points from the stationary interval only.
 
-## 4. Fit PySR with omega scan
+If you run without `--denoise`, you can raise `--samples-per-frame` to 300-1200.
+With `--denoise`, start smaller because PySR first builds a Gaussian-process
+denoising model.
+
+## 4. Fit PySR with a rotating template
 
 Start with a short run:
 
@@ -78,23 +82,40 @@ Start with a short run:
   --dataset colab_outputs/prepared/dataset.npz \
   --metadata colab_outputs/prepared/metadata.json \
   --out-dir colab_outputs/pysr_run \
-  --omega-min -0.0004 \
-  --omega-max 0.0004 \
-  --omega-count 17 \
-  --niterations 80 \
-  --maxsize 30 \
-  --populations 8 \
-  --parsimony 0.003 \
+  --niterations 800 \
+  --maxsize 80 \
+  --populations 24 \
+  --parsimony 0.0001 \
+  --density-weight 20 \
+  --density-weight-power 2 \
+  --denoise \
   --batch-size 512 \
-  --timeout-minutes 20
+  --timeout-minutes 45 \
+  --tensorboard-log-dir colab_outputs/tensorboard/spoke_template \
+  --tensorboard-log-interval 10
 ```
 
-`--timeout-minutes` is an approximate total budget for the whole omega scan;
-the script divides it across the requested `--omega-count` values.
+The script uses a structured expression:
+
+```text
+template(x,y,tau) = F(
+    x*cos(omega*tau + phi) + y*sin(omega*tau + phi),
+   -x*sin(omega*tau + phi) + y*cos(omega*tau + phi)
+)
+```
+
+`omega` and `phi` are optimized PySR parameters. Since `tau` is normalized,
+the physical angular speed is the learned `omega / t_scale`.
 
 By default, raw PySR/Julia progress bars are written to log files instead of
-Colab output. The notebook output only shows one compact progress line per
-omega value. Add `--show-pysr-output` only when debugging PySR itself.
+Colab output. Add `--show-pysr-output` only when debugging PySR itself.
+
+To view TensorBoard in Colab:
+
+```python
+%load_ext tensorboard
+%tensorboard --logdir colab_outputs/tensorboard
+```
 
 Outputs:
 
@@ -102,15 +123,18 @@ Outputs:
 - `colab_outputs/pysr_run/metadata.json`
 - `colab_outputs/pysr_run/formula.txt`
 - `colab_outputs/pysr_run/equations.csv`
-- `colab_outputs/pysr_run/omega_scan_metrics.json`
-- `colab_outputs/pysr_run/pysr_logs/omega_*.log`
+- `colab_outputs/pysr_run/pysr.log`
 
-The time-dependent PySR operator set is fixed:
+The time-dependent PySR operator set is fixed. `sin` and `cos` are included
+because the template itself contains the rotating coordinate transform:
 
 ```python
 binary_operators = ["+", "-", "*", "/"]
-unary_operators = ["sqrt", "abs", "exp"]
+unary_operators = ["sqrt", "exp", "sin", "cos"]
 ```
+
+`abs` is excluded by default because the last-frame experiments showed
+piecewise ray-like artifacts.
 
 ## 5. Evaluate on full frames
 
@@ -171,5 +195,5 @@ display(Image("colab_outputs/pysr_last_frame/comparison_last_frame.png"))
 - No smoothing is applied.
 - No interpolation is applied.
 - No phase tracking is performed during preparation.
-- `phi0` is omitted in the first version because a constant phase shift is
-  absorbed by the learned spatial function `F(u_n, v_n)`.
+- The fit template includes `phi`, because it helps PySR align the stationary
+  pattern while still keeping time dependence physically constrained.
