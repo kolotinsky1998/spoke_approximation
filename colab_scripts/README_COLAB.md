@@ -1,199 +1,94 @@
-# Direct PySR fit for the rotating ion-density spoke
+# Cluster pipeline for spoke approximation
 
-This Colab workflow keeps preprocessing minimal. It does not smooth,
-interpolate, estimate the spoke phase, or transform the data to a rotating
-frame during preparation.
+This workflow has two stages:
 
-The dataset preparation step only builds a compact table:
+1. Build the rotating-frame average density and estimate the spoke angular
+   velocity.
+2. Fit an analytic PySR formula for the averaged density in polar coordinates.
+
+The scripts are intentionally simple for cluster runs. Command-line arguments
+are used only for paths. Calculation parameters are constants near the top of
+each Python file.
+
+## 1. Rotating-frame average
+
+Edit the calculation constants at the top of:
 
 ```text
-x_n, y_n, t_n -> rho_i
+colab_scripts/prepare_spoke_dataset.py
 ```
 
-The rotating-pattern assumption is imposed during fitting with
-`TemplateExpressionSpec`. PySR optimizes the angular phase parameters inside
-the search rather than scanning `omega` on a fixed grid:
+Then run:
 
-```text
-tau = (t - t0) / t_scale
-alpha(t) = omega*tau + phi
-
-u_n =  x_n*cos(alpha) + y_n*sin(alpha)
-v_n = -x_n*sin(alpha) + y_n*cos(alpha)
-
-rho_i(x, y, t) ~= target_scale * F(u_n, v_n)
-```
-
-## 1. Clone the repository in Colab
-
-```python
-REPO_URL = "https://github.com/kolotinsky1998/spoke_approximation.git"
-PROJECT_DIR = "/content/spoke_approximation"
-
-import os
-
-if not os.path.exists(PROJECT_DIR):
-    !git clone {REPO_URL} {PROJECT_DIR}
-else:
-    %cd {PROJECT_DIR}
-    !git pull
-
-%cd {PROJECT_DIR}
-```
-
-## 2. Install dependencies
-
-The first PySR run compiles Julia packages and may take several minutes.
-
-```python
-%pip install -U "pysr==1.5.9" numpy pandas matplotlib joblib tensorboard
-```
-
-## 3. Prepare the dataset
-
-```python
-!python colab_scripts/prepare_spoke_dataset.py \
+```bash
+python colab_scripts/prepare_spoke_dataset.py \
   --data-dir data \
-  --out-dir colab_outputs/prepared \
-  --steady-fraction 0.55 \
-  --samples-per-frame 120 \
-  --domain-eps 0.0 \
-  --random-state 7
+  --out-dir outputs/rotating_average
 ```
 
 Outputs:
 
-- `colab_outputs/prepared/dataset.npz`
-- `colab_outputs/prepared/metadata.json`
+- `outputs/rotating_average/rotating_average.npz`
+- `outputs/rotating_average/metadata.json`
+- `outputs/rotating_average/phase_fit.png`
+- `outputs/rotating_average/rotating_average_2d.png`
 
-The preparation script removes points outside the nonzero plasma domain and
-samples points from the stationary interval only.
-
-If you run without `--denoise`, you can raise `--samples-per-frame` to 300-1200.
-With `--denoise`, start smaller because PySR first builds a Gaussian-process
-denoising model.
-
-## 4. Fit PySR with a rotating template
-
-Start with a short run:
-
-```python
-!python colab_scripts/fit_spoke_pysr.py \
-  --dataset colab_outputs/prepared/dataset.npz \
-  --metadata colab_outputs/prepared/metadata.json \
-  --out-dir colab_outputs/pysr_run \
-  --niterations 800 \
-  --maxsize 80 \
-  --populations 24 \
-  --parsimony 0.0001 \
-  --density-weight 20 \
-  --density-weight-power 2 \
-  --denoise \
-  --batch-size 512 \
-  --timeout-minutes 45 \
-  --tensorboard-log-dir colab_outputs/tensorboard/spoke_template \
-  --tensorboard-log-interval 10
-```
-
-The script uses a structured expression:
+The script estimates the spoke phase using the first azimuthal harmonic after
+subtracting a radial background, fits
 
 ```text
-template(x,y,tau) = F(
-    x*cos(omega*tau + phi) + y*sin(omega*tau + phi),
-   -x*sin(omega*tau + phi) + y*cos(omega*tau + phi)
-)
+phase(t) ~= omega*t + phi0
 ```
 
-`omega` and `phi` are optimized PySR parameters. Since `tau` is normalized,
-the physical angular speed is the learned `omega / t_scale`.
+and averages all stationary frames in the co-rotating frame.
 
-By default, raw PySR/Julia progress bars are written to log files instead of
-Colab output. Add `--show-pysr-output` only when debugging PySR itself.
+## 2. PySR fit in polar coordinates
 
-To view TensorBoard in Colab:
+Edit the calculation constants at the top of:
 
-```python
-%load_ext tensorboard
-%tensorboard --logdir colab_outputs/tensorboard
+```text
+colab_scripts/fit_spoke_pysr.py
+```
+
+Then run:
+
+```bash
+python colab_scripts/fit_spoke_pysr.py \
+  --average-file outputs/rotating_average/rotating_average.npz \
+  --metadata outputs/rotating_average/metadata.json \
+  --out-dir outputs/pysr_polar
 ```
 
 Outputs:
 
-- `colab_outputs/pysr_run/model.pkl`
-- `colab_outputs/pysr_run/metadata.json`
-- `colab_outputs/pysr_run/formula.txt`
-- `colab_outputs/pysr_run/equations.csv`
-- `colab_outputs/pysr_run/pysr.log`
+- `outputs/pysr_polar/model.pkl`
+- `outputs/pysr_polar/equations.csv`
+- `outputs/pysr_polar/formula.txt`
+- `outputs/pysr_polar/metrics.json`
+- `outputs/pysr_polar/comparison.png`
+- `outputs/pysr_polar/formula_surface.html`
 
-The time-dependent PySR operator set is fixed. `sin` and `cos` are included
-because the template itself contains the rotating coordinate transform:
+The fitted model uses nonzero finite density cells only and searches
 
-```python
-binary_operators = ["+", "-", "*", "/"]
-unary_operators = ["sqrt", "exp", "sin", "cos"]
+```text
+rho_mean(r, theta) ~= target_scale * F(r, theta, sin(theta), cos(theta))
 ```
 
-`abs` is excluded by default because the last-frame experiments showed
-piecewise ray-like artifacts.
+where
 
-## 5. Evaluate on full frames
-
-```python
-!python colab_scripts/evaluate_spoke_formula.py \
-  --model colab_outputs/pysr_run/model.pkl \
-  --metadata colab_outputs/pysr_run/metadata.json \
-  --data-dir data \
-  --out-dir colab_outputs/evaluation
+```text
+r = sqrt(x_n^2 + y_n^2)
+theta = atan2(y_n, x_n) - theta_spoke
 ```
 
-Display results:
-
-```python
-from IPython.display import Image, display
-import glob
-
-print(open("colab_outputs/pysr_run/formula.txt").read())
-
-for path in sorted(glob.glob("colab_outputs/evaluation/comparison_*.png")):
-    display(Image(path))
-```
-
-## Optional: fit only the last frame
-
-This diagnostic checks whether PySR can approximate a single stationary frame
-without any time dependence:
-
-```python
-!python colab_scripts/fit_last_frame_pysr.py \
-  --data-dir data \
-  --out-dir colab_outputs/pysr_last_frame \
-  --n-samples 0 \
-  --niterations 500 \
-  --maxsize 60 \
-  --populations 20 \
-  --parsimony 0.0003 \
-  --model-selection accuracy \
-  --batch-size 512 \
-  --timeout-minutes 25
-```
-
-By default this last-frame diagnostic excludes `abs`, because it often creates
-piecewise ray-like artifacts. Add `--include-abs` only when you deliberately
-want piecewise formulas.
-
-Display:
-
-```python
-from IPython.display import Image, display
-
-print(open("colab_outputs/pysr_last_frame/formula.txt").read())
-display(Image("colab_outputs/pysr_last_frame/comparison_last_frame.png"))
-```
+The learned averaged formula can be lifted back to the lab frame with the
+rotation parameters saved in `metadata.json`.
 
 ## Notes
 
-- No smoothing is applied.
-- No interpolation is applied.
-- No phase tracking is performed during preparation.
-- The fit template includes `phi`, because it helps PySR align the stationary
-  pattern while still keeping time dependence physically constrained.
+- The direct time-dependent `TemplateExpressionSpec` approach is no longer the
+  main pipeline.
+- PySR parallelism is controlled by the `PROCS` constant in
+  `fit_spoke_pysr.py`.
+- Batching is disabled by default because the averaged 2D profile contains only
+  a few thousand nonzero cells.

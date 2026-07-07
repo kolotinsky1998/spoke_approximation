@@ -73,6 +73,26 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, f
     return mae, rmse, r2
 
 
+def predict_scaled(model, X: np.ndarray) -> np.ndarray:
+    """Predict with PySR, with a fallback for TemplateExpressionSpec exports."""
+    try:
+        return np.asarray(model.predict(X), dtype=float)
+    except ValueError as exc:
+        message = str(exc)
+        if "Length mismatch" not in message:
+            raise
+
+        best = model.get_best()
+        if "lambda_format" not in best:
+            raise
+
+        # PySR 1.5.x can store feature_names_in_ for the inner template
+        # expression, while the exported Julia callable still accepts the full
+        # external variables [x, y, tau]. Calling lambda_format directly avoids
+        # the pandas column-renaming step inside model.predict.
+        return np.asarray(best["lambda_format"](np.asarray(X, dtype=float)), dtype=float)
+
+
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -122,7 +142,7 @@ def main() -> None:
         target = load_target(by_step[step], args.signed_target)
         mask = evaluation_mask(target, metadata)
         X = template_features(target.shape, step, metadata)
-        pred = model.predict(X).reshape(target.shape) * metadata["target_scale"]
+        pred = predict_scaled(model, X).reshape(target.shape) * metadata["target_scale"]
         residual = pred - target
 
         flat_target = target[mask]
