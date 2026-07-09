@@ -19,34 +19,37 @@ RHO_EPS = 1e-12
 RANDOM_STATE = 7
 VALIDATION_SIZE = 0.2
 
-NITERATIONS = 800
-MAXSIZE = 45
+NITERATIONS = 300000
+MAXSIZE = 35
 POPULATIONS = 20
-PARSIMONY = 0.001
-TIMEOUT_MINUTES = 40
-PROCS = 4
+PARSIMONY = 0.0003
+TIMEOUT_MINUTES = 1200
+PROCS = 20
 
-DENSITY_WEIGHT = 5.0
-DENSITY_WEIGHT_POWER = 2.0
+DENSITY_WEIGHT = 0.0
+DENSITY_WEIGHT_POWER = 1.0
 
 BINARY_OPERATORS = ["+", "-", "*", "/"]
-UNARY_OPERATORS = ["exp", "sin", "cos"]
+UNARY_OPERATORS = ["exp", "erf", "sin", "cos"]
 
 CONSTRAINTS = {
     "exp": 10,
+    "erf": 10,
     "sin": 8,
     "cos": 8,
     "/": (-1, 10),
 }
 
 NESTED_CONSTRAINTS = {
-    "exp": {"exp": 0, "sin": 0, "cos": 0},
-    "sin": {"exp": 0, "sin": 0, "cos": 0},
-    "cos": {"exp": 0, "sin": 0, "cos": 0},
+    "exp": {"exp": 0, "sin": 0, "cos": 0, "erf": 0},
+    "erf": {"exp": 0, "sin": 0, "cos": 0, "erf": 0},
+    "sin": {"exp": 0, "sin": 0, "cos": 0, "erf": 0},
+    "cos": {"exp": 0, "sin": 0, "cos": 0, "erf": 0},
 }
 
 COMPLEXITY_OF_OPERATORS = {
     "exp": 3,
+    "erf": 3,
     "sin": 3,
     "cos": 3,
 }
