@@ -75,9 +75,23 @@ def infer_geometry(rho_frame: np.ndarray) -> tuple[float, float, float]:
     y = row - cy
     mask = np.abs(rho_frame) > DOMAIN_EPS
     if not np.any(mask):
-        raise ValueError("Cannot infer R0: first ion-density frame has an empty nonzero domain.")
+        raise ValueError("Cannot infer R0: ion-density frame has an empty nonzero domain.")
     r0 = float(max(np.max(np.abs(x[mask])), np.max(np.abs(y[mask])), 1.0))
     return cx, cy, r0
+
+
+def find_geometry_frame(common_steps: list[int], rho_paths: dict[int, Path], expected_shape: tuple[int, int]) -> tuple[np.ndarray, int]:
+    if R0_CELLS is not None:
+        return load_frame(rho_paths[common_steps[0]]), int(common_steps[0])
+
+    for step in common_steps:
+        frame = load_frame(rho_paths[step])
+        if frame.shape != expected_shape:
+            raise ValueError(f"Inconsistent rho shape in {rho_paths[step]}.")
+        if np.any(np.abs(frame) > DOMAIN_EPS):
+            return frame, int(step)
+
+    raise ValueError("Cannot infer R0: all ion-density frames have an empty nonzero domain.")
 
 
 def sample_bilinear(frame: np.ndarray, x_cell: float, y_cell: float) -> float:
@@ -106,7 +120,8 @@ def collect_traces(
     if first_rho.shape != first_phi.shape:
         raise ValueError(f"Shape mismatch: rho {first_rho.shape}, phi {first_phi.shape}.")
 
-    cx, cy, r0 = infer_geometry(first_rho)
+    geometry_rho, geometry_step = find_geometry_frame(common_steps, rho_paths, first_rho.shape)
+    cx, cy, r0 = infer_geometry(geometry_rho)
     sample_points = []
     for name, x_over_r0, y_over_r0 in POINTS:
         sample_points.append(
@@ -151,6 +166,7 @@ def collect_traces(
         "n_steps": len(common_steps),
         "first_step": int(common_steps[0]),
         "last_step": int(common_steps[-1]),
+        "geometry_step": geometry_step,
     }
     return rows, metadata
 
@@ -260,6 +276,7 @@ def main() -> None:
     print(f"Saved interactive plot to {out_dir / 'ion_density_phi_time_traces.html'}")
     print(f"Points sampled with center=({metadata['center_x_cell']:.6g}, {metadata['center_y_cell']:.6g})")
     print(f"R0 = {metadata['r0_cells']:.6g} cells")
+    print(f"R0 inferred from step = {metadata['geometry_step']}")
 
 
 if __name__ == "__main__":
