@@ -84,6 +84,32 @@ theta = atan2(y_n, x_n) - theta_spoke
 The learned averaged formula can be lifted back to the lab frame with the
 rotation parameters saved in `metadata.json`.
 
+## Electric potential pipeline
+
+The same two-stage workflow is available for electric potential frames named
+like `phi_1450000.txt` in a separate `data_phi/` directory.
+
+First build the rotating-frame average potential:
+
+```bash
+python colab_scripts/prepare_phi_dataset.py \
+  --data-dir data_phi \
+  --out-dir outputs_phi/rotating_average
+```
+
+Then fit the averaged potential in polar coordinates:
+
+```bash
+python colab_scripts/fit_phi_pysr.py \
+  --average-file outputs_phi/rotating_average/rotating_average.npz \
+  --metadata outputs_phi/rotating_average/metadata.json \
+  --out-dir outputs_phi/pysr_polar
+```
+
+The potential scripts preserve the sign of `phi`. During fitting, zero cells are
+removed using `abs(phi) > PHI_EPS`, and the target scale is computed from
+`abs(phi)`.
+
 ## Notes
 
 - The direct time-dependent `TemplateExpressionSpec` approach is no longer the
