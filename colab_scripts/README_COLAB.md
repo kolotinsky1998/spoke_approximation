@@ -118,6 +118,25 @@ The potential scripts preserve the sign of `phi`. During fitting, zero cells are
 removed using `abs(phi) > PHI_EPS`, and the target scale is computed from
 `abs(phi)`.
 
+## Time traces at Figure-4 points
+
+To plot ion-density and electric-potential time traces at the points
+`(R0/2, 0)` and `(0.99 R0, 0)`, run:
+
+```bash
+python colab_scripts/plot_ion_density_phi_time_traces.py \
+  --rho-dir data \
+  --phi-dir data_phi \
+  --out-dir outputs_phi/time_traces
+```
+
+Outputs:
+
+- `outputs_phi/time_traces/ion_density_phi_time_traces.csv`
+- `outputs_phi/time_traces/time_trace_points_metadata.json`
+- `outputs_phi/time_traces/ion_density_phi_time_traces.png`
+- `outputs_phi/time_traces/ion_density_phi_time_traces.html`
+
 ## Notes
 
 - The direct time-dependent `TemplateExpressionSpec` approach is no longer the
