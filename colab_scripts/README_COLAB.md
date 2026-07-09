@@ -97,6 +97,14 @@ python colab_scripts/prepare_phi_dataset.py \
   --out-dir outputs_phi/rotating_average
 ```
 
+Outputs:
+
+- `outputs_phi/rotating_average/rotating_average.npz`
+- `outputs_phi/rotating_average/metadata.json`
+- `outputs_phi/rotating_average/phase_fit.png`
+- `outputs_phi/rotating_average/rotating_average_2d.png`
+- `outputs_phi/rotating_average/rotating_average_3d.html`
+
 Then fit the averaged potential in polar coordinates:
 
 ```bash

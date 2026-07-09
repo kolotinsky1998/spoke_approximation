@@ -211,6 +211,40 @@ def save_average_plot(out_dir: Path, mean_pattern: np.ndarray, std_pattern: np.n
     plt.close(fig)
 
 
+def save_average_surface_html(out_dir: Path, mean_pattern: np.ndarray, mask: np.ndarray) -> None:
+    import plotly.graph_objects as go
+
+    ny, nx = mean_pattern.shape
+    x_plot, y_plot = np.meshgrid(np.arange(nx), np.arange(ny))
+    z_plot = np.where(mask, mean_pattern, np.nan)
+    lim = max(float(np.nanpercentile(np.abs(z_plot[np.isfinite(z_plot)]), 99.5)), 1e-12)
+
+    fig = go.Figure(
+        data=[
+            go.Surface(
+                x=x_plot,
+                y=y_plot,
+                z=z_plot,
+                colorscale="RdBu",
+                cmin=-lim,
+                cmax=lim,
+                colorbar=dict(title="phi mean"),
+            )
+        ]
+    )
+    fig.update_layout(
+        title="Rotating-frame average electric potential",
+        scene=dict(
+            xaxis_title="x cell",
+            yaxis_title="y cell",
+            zaxis_title="mean phi",
+            aspectratio=dict(x=1, y=1, z=0.45),
+        ),
+        margin=dict(l=0, r=0, t=50, b=0),
+    )
+    fig.write_html(out_dir / "rotating_average_3d.html", include_plotlyjs="cdn")
+
+
 def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -307,9 +341,11 @@ def main() -> None:
 
     save_phase_plot(out_dir, stationary_times, phases_unwrapped, phase_fit, float(omega))
     save_average_plot(out_dir, mean_pattern, std_pattern, frames[-1], domain_mask)
+    save_average_surface_html(out_dir, mean_pattern, domain_mask)
 
     print(f"Saved rotating potential average to {out_dir / 'rotating_average.npz'}")
     print(f"Saved metadata to {out_dir / 'metadata.json'}")
+    print(f"Saved 3D surface to {out_dir / 'rotating_average_3d.html'}")
     print(f"Stationary frames: {len(steady_idx)} / {len(paths)}")
     print(f"Domain cells: {metadata['domain_cell_count']} / {first.size}")
     print(f"omega = {omega:.12g}")
